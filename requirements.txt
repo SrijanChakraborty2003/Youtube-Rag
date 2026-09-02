@@ -7,3 +7,8 @@ torchaudio==2.9.1
 nemo_toolkit[asr]
 pydub
 imageio-ffmpeg
+chromadb
+sentence-transformers
+rank-bm25
+flashrank
+

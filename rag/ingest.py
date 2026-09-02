@@ -2,15 +2,18 @@ import os
 import json
 from typing import List, Dict, Any
 from rag.chunker import parse_srt_file, create_sliding_window_chunks
+from rag.vectorstore import VectorStoreManager
 
 def ingest_video(
     video_folder: str,
     chunk_seconds: float = 60.0,
-    overlap_seconds: float = 5.0
+    overlap_seconds: float = 5.0,
+    auto_vectorize: bool = True
 ) -> List[Dict[str, Any]]:
     """
     Reads audio.srt and metadata.json from video_folder, performs 60s/5s sliding
-    window chunking, saves the chunks to chunks.json, and returns the chunk list.
+    window chunking, saves the chunks to chunks.json, embeds and indexes chunks into
+    ChromaDB, and returns the chunk list.
     """
     if not os.path.exists(video_folder):
         raise FileNotFoundError(f"Video folder does not exist: {video_folder}")
@@ -52,4 +55,16 @@ def ingest_video(
         json.dump(chunks, f, indent=4, ensure_ascii=False)
 
     print(f"[INGEST] Successfully generated {len(chunks)} chunks and saved to: {chunks_path}")
+
+    # Automatically vectorize and index into ChromaDB
+    if auto_vectorize and chunks:
+        print(f"[INGEST] Automatically indexing {len(chunks)} chunks into ChromaDB Vector Store...")
+        try:
+            vstore = VectorStoreManager()
+            vstore.upsert_chunks(chunks)
+            print(f"[INGEST] Vector indexing complete!")
+        except Exception as vec_err:
+            print(f"[INGEST] Warning: Failed to vectorize chunks into ChromaDB: {vec_err}")
+
     return chunks
+
