@@ -1,0 +1,6 @@
+*.ipynb
+__pycache__
+__init__.py
+*.json
+.env
+*.srt

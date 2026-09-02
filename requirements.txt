@@ -1,0 +1,9 @@
+yt-dlp
+curl-cffi
+numpy
+soundfile
+torch==2.9.1
+torchaudio==2.9.1
+nemo_toolkit[asr]
+pydub
+imageio-ffmpeg
