@@ -11,4 +11,6 @@ chromadb
 sentence-transformers
 rank-bm25
 flashrank
-
+ollama
+flask
+flask-cors

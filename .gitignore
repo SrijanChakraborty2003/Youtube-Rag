@@ -6,3 +6,8 @@ __init__.py
 *.srt
 chroma_db
 *.bin
+.env
+/op
+*.wav
+.db-shm
+.db-wal

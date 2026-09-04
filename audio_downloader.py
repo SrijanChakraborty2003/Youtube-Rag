@@ -42,10 +42,17 @@ def get_ffmpeg_path():
         return ffmpeg_sys
     return None
 
-def download_audio(url: str, output_dir: str = '.', cookies_from_browser: str = None, on_complete_callback = None) -> list:
+def download_audio(
+    url: str,
+    output_dir: str = '.',
+    cookies_from_browser: str = None,
+    on_complete_callback = None,
+    on_progress_callback = None
+) -> list:
     """
     Downloads a YouTube video or playlist as audio in WAV format.
     Creates a folder for each video containing the audio file and a metadata JSON file.
+    Invokes on_progress_callback(event_data) at each stage.
     Invokes on_complete_callback(track_info) immediately upon finishing each download.
     Returns a list of dictionaries with info about downloaded videos.
     """
@@ -90,8 +97,16 @@ def download_audio(url: str, output_dir: str = '.', cookies_from_browser: str = 
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
 
-    print(f"Found {len(entries)} video(s) to process.")
+    total_videos = len(entries)
+    print(f"Found {total_videos} video(s) to process.")
     print("-" * 50)
+
+    if on_progress_callback:
+        on_progress_callback({
+            "stage": "discovered",
+            "total": total_videos,
+            "title": info.get('title', 'Playlist') if is_playlist else entries[0].get('title', 'Video')
+        })
 
     downloaded_tracks = []
 
@@ -110,7 +125,17 @@ def download_audio(url: str, output_dir: str = '.', cookies_from_browser: str = 
             print(f"Skipping entry {idx} due to missing title or URL.")
             continue
 
-        print(f"[{idx}/{len(entries)}] Downloading: {title}")
+        if on_progress_callback:
+            on_progress_callback({
+                "stage": "downloading",
+                "idx": idx,
+                "total": total_videos,
+                "title": title,
+                "url": video_url
+            })
+
+        print(f"[{idx}/{total_videos}] Downloading: {title}")
+
 
         # Create subfolder named after the sanitized video title inside target_dir
         safe_title = sanitize_folder_name(title)
@@ -165,11 +190,15 @@ def download_audio(url: str, output_dir: str = '.', cookies_from_browser: str = 
             track = {
                 "title": title,
                 "video_folder": video_folder,
-                "audio_path": audio_path
+                "audio_path": audio_path,
+                "idx": idx,
+                "total": total_videos,
+                "url": video_url
             }
             downloaded_tracks.append(track)
             if on_complete_callback:
                 on_complete_callback(track)
+
         except Exception as e:
             print(f"Error processing {title}: {e}", file=sys.stderr)
         finally:

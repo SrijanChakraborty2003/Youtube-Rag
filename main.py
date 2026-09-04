@@ -1,9 +1,8 @@
 import os
 import sys
+import time
 import argparse
-from audio_downloader import download_audio
-from audio_transcriber import transcribe_audio, save_srt
-from rag.ingest import ingest_video
+from werkzeug.serving import make_server
 
 # Reconfigure stdout/stderr to support printing unicode characters on Windows
 if sys.stdout.encoding != 'utf-8':
@@ -17,73 +16,49 @@ if sys.stderr.encoding != 'utf-8':
     except AttributeError:
         pass
 
-def process_track_synchronously(track):
-    """
-    Transcribes the downloaded WAV file immediately and deletes it to save disk space
-    before the next download begins.
-    """
-    title = track["title"]
-    video_folder = track["video_folder"]
-    audio_path = track["audio_path"]
-    
-    print(f"\n[ASR] Starting transcription for: {title}")
-    if os.path.exists(audio_path):
-        try:
-            # Run ASR transcription
-            segments = transcribe_audio(
-                audio_file=audio_path,
-                chunk_seconds=60.0,
-                overlap_seconds=1.0
-            )
-            
-            # Save subtitle file
-            srt_path = os.path.join(video_folder, "audio.srt")
-            save_srt(segments, srt_path)
-            print(f"[ASR] Successfully saved SRT to: {srt_path}")
-            print(f"[ASR] Parakeet is done processing this file: {title}")
-            
-            # Run Data Ingestion & Sliding Window Chunking Pipeline (60s window, 5s overlap)
-            try:
-                ingest_video(video_folder, chunk_seconds=60.0, overlap_seconds=5.0)
-            except Exception as ingest_err:
-                print(f"[INGEST] Error during chunking ingestion for {title}: {ingest_err}", file=sys.stderr)
-            
-            # Delete the massive audio WAV file immediately to free C drive space
-            try:
-                os.remove(audio_path)
-                print(f"[ASR] Cleaned up temporary WAV file: {audio_path}")
-            except Exception as del_err:
-                print(f"[ASR] Warning: Could not delete audio WAV file: {del_err}", file=sys.stderr)
-        except Exception as e:
-            print(f"[ASR] Error transcribing {title}: {e}", file=sys.stderr)
-    else:
-        print(f"[ASR] Warning: Audio file not found at {audio_path}", file=sys.stderr)
+# Add project root to sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from web.chat_app import app as chat_app
+
+def print_welcome_banner():
+    print("\n" + "=" * 76)
+    print(" 🎬 VIDEO KNOWLEDGE RAG SYSTEM (MULTI-USER ISOLATED CHATS)")
+    print("=" * 76)
+    print(" 💬 Web Application URL : http://localhost:5000")
+    print("=" * 76)
+    print(" Production Architecture:")
+    print("   • Multi-User Privacy  : Email & 6-Digit OTP Authentication (Zero Data Leakage)")
+    print("   • Video Isolation     : Each Chat is an Isolated Knowledge Base")
+    print("   • Long-Term Memory    : Immediate 8-Message Buffer + Recursive Rolling Summarization")
+    print("   • Ingestion Pipeline  : Direct in-app background worker with real-time progress")
+    print("   • LLM Synthesis       : gpt-oss:120b-cloud (via Ollama)")
+    print("   • ASR Transcription   : NVIDIA NeMo Parakeet 0.6B CTC (Local GPU)")
+    print("   • Chunker             : 60s Sliding Window (5s overlap) with Subtitle Cues")
+    print("   • Dense Vector Store  : BAAI/bge-small-en-v1.5 + ChromaDB (Cosine)")
+    print("   • Sparse Search       : Scoped BM25Okapi Keyword Matching")
+    print("   • Query Expansion     : 5-Query Parallel Expansion via gpt-oss:120b-cloud")
+    print("   • Fusion & Re-ranker  : Reciprocal Rank Fusion (Top 10) + FlashRank (Top 5)")
+    print("   • Citations           : Exact Second Deep-Links [Video Title @ MM:SS](&t=XXs)")
+    print("=" * 76)
+    print(" Press Ctrl+C at any time to shut down the server.\n")
+
+def run_server(port: int = 5000, host: str = "0.0.0.0"):
+    print_welcome_banner()
+    server = make_server(host, port, chat_app, threaded=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[SHUTDOWN] Stopping web server...")
+        server.server_close()
+        print("[SHUTDOWN] Server stopped gracefully.")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Download and Transcribe YouTube links sequentially (WAV + local ASR)")
-    parser.add_argument("-o", "--output", default=r"C:\Users\User\Downloads\Rag (2)\Rag\op", help="Output directory for the files")
-    parser.add_argument("-c", "--cookies-from-browser", help="Browser to read cookies from (e.g. chrome, edge, firefox, brave)")
-    
+    parser = argparse.ArgumentParser(description="Video Knowledge RAG System")
+    parser.add_argument("-p", "--port", type=int, default=5000, help="Port to run the web server on (default: 5000)")
+    parser.add_argument("-H", "--host", default="0.0.0.0", help="Host to bind the web server to (default: 0.0.0.0)")
+
     args = parser.parse_args()
-
-    # Hardcoded list of YouTube links (can be video or playlist links)
-    YOUTUBE_LINKS = [
-        "https://www.youtube.com/watch?v=0hgzLDHplYk",
-        # Add more video or playlist links here
-    ]
-
-    print("Starting sequential pipeline: Downloader -> Transcriber -> WAV Cleanup (Parakeet 0.6b)...")
-    
-    for idx, link in enumerate(YOUTUBE_LINKS, 1):
-        print(f"\n[{idx}/{len(YOUTUBE_LINKS)}] Processing URL: {link}")
-        
-        # Download audio one by one. The callback transcribes and deletes each WAV file
-        # synchronously before yt-dlp proceeds to download the next video.
-        download_audio(
-            url=link, 
-            output_dir=args.output, 
-            cookies_from_browser=args.cookies_from_browser,
-            on_complete_callback=process_track_synchronously
-        )
-
-    print("\nAll downloads and transcriptions completed successfully!")
+    run_server(port=args.port, host=args.host)

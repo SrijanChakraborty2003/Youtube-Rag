@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Multi-User Video Knowledge Conversational Agent powered by gpt-oss:120b-cloud, per-chat video isolation, recursive rolling memory buffer, and second-accurate YouTube timestamp citations.">
+    <title>Video Knowledge RAG — Multi-User Isolated Video Chats</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/chat.css">
+</head>
+<body>
+    <!-- Live Toast Notification for Ingestion Events -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <!-- 1. Authentication Modal Overlay -->
+    <div id="auth-modal" class="modal-overlay hidden">
+        <div class="auth-card">
+            <div class="auth-header">
+                <div class="brand-icon large">🎬</div>
+                <h2 class="auth-title">Welcome to VideoRAG</h2>
+                <p class="auth-subtitle">Sign in with your email to access your private video knowledge bases</p>
+            </div>
+
+            <!-- Step 1: Email Form -->
+            <form id="email-form" class="auth-form">
+                <div class="form-group">
+                    <label for="auth-email-input" class="form-label">Email Address</label>
+                    <input 
+                        type="email" 
+                        id="auth-email-input" 
+                        class="form-input" 
+                        placeholder="you@example.com" 
+                        required 
+                        autocomplete="email"
+                    />
+                </div>
+                <button type="submit" id="send-otp-btn" class="primary-btn full-width">
+                    <span>Send Verification Code</span>
+                    <span class="btn-icon">➔</span>
+                </button>
+            </form>
+
+            <!-- Step 2: OTP Form (Hidden initially) -->
+            <form id="otp-form" class="auth-form hidden">
+                <div id="otp-status-banner" class="status-banner"></div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="auth-otp-input" class="form-label">6-Digit Verification Code</label>
+                        <button type="button" id="back-to-email-btn" class="text-link-btn">Change Email</button>
+                    </div>
+                    <input 
+                        type="text" 
+                        id="auth-otp-input" 
+                        class="form-input otp-input" 
+                        placeholder="123456" 
+                        maxlength="6" 
+                        required 
+                        autocomplete="one-time-code"
+                    />
+                    <div id="otp-hint" class="form-hint">Enter the 6-digit verification code sent to your email.</div>
+                </div>
+
+                <button type="submit" id="verify-otp-btn" class="primary-btn full-width">
+                    <span>Verify & Log In</span>
+                    <span class="btn-icon">✓</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- 2. New Chat Modal Overlay -->
+    <div id="new-chat-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Create New Video Chat</h3>
+                <button class="close-modal-btn" id="close-new-chat-modal">&times;</button>
+            </div>
+            <form id="new-chat-form" class="modal-form">
+                <div class="form-group">
+                    <label for="new-chat-title" class="form-label">Chat Title (Optional)</label>
+                    <input type="text" id="new-chat-title" class="form-input" placeholder="e.g. Fine-Tuning Tutorial Discussion" />
+                </div>
+                <div class="form-group">
+                    <label for="new-chat-url" class="form-label">YouTube Video or Playlist URL</label>
+                    <input type="url" id="new-chat-url" class="form-input" placeholder="https://www.youtube.com/watch?v=... or playlist link" required />
+                    <div class="form-hint">Supports single videos and full YouTube playlists. Audio is transcribed via local GPU ASR and chunked (60s/5s).</div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="cancel-btn" id="cancel-new-chat-btn">Cancel</button>
+                    <button type="submit" class="primary-btn" id="confirm-new-chat-btn">Create & Ingest Video</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 3. Add Video to Current Chat Modal Overlay -->
+    <div id="add-video-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Add Video to Current Chat</h3>
+                <button class="close-modal-btn" id="close-add-video-modal">&times;</button>
+            </div>
+            <form id="add-video-form" class="modal-form">
+                <div id="add-video-status-banner" class="status-banner hidden" style="margin-bottom: 1rem; color: #ff8585; background: rgba(255, 107, 107, 0.12); border: 1px solid rgba(255, 107, 107, 0.35); padding: 0.75rem 1rem; border-radius: 8px; font-size: 0.88rem; font-weight: 500;"></div>
+                <div class="form-group">
+                    <label for="add-video-url" class="form-label">YouTube Video or Playlist URL</label>
+                    <input type="url" id="add-video-url" class="form-input" placeholder="https://www.youtube.com/watch?v=..." required />
+                    <div class="form-hint">This video will be appended into this chat's isolated knowledge base.</div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="cancel-btn" id="cancel-add-video-btn">Cancel</button>
+                    <button type="submit" class="primary-btn" id="confirm-add-video-btn">Add Video</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 4. Rename Chat Modal Overlay -->
+    <div id="rename-chat-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Rename Conversation</h3>
+                <button class="close-modal-btn" id="close-rename-chat-modal">&times;</button>
+            </div>
+            <form id="rename-chat-form" class="modal-form">
+                <div class="form-group">
+                    <label for="rename-chat-title-input" class="form-label">Conversation Title</label>
+                    <input type="text" id="rename-chat-title-input" class="form-input" placeholder="Enter new chat title..." required maxlength="120" />
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="cancel-btn" id="cancel-rename-chat-btn">Cancel</button>
+                    <button type="submit" class="primary-btn" id="confirm-rename-chat-btn">Save Title</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- App Layout -->
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">
+                    <div class="brand-icon">🎬</div>
+                    <div class="brand-text">
+                        <span class="brand-title">VideoRAG</span>
+                        <span class="brand-subtitle">Private Video Chats</span>
+                    </div>
+                </div>
+                <button id="toggle-sidebar-btn" class="icon-btn toggle-btn" title="Collapse Sidebar">‹</button>
+            </div>
+
+            <!-- New Chat Button -->
+            <div class="sidebar-action-row">
+                <button id="open-new-chat-btn" class="new-chat-btn">
+                    <span class="btn-icon">+</span>
+                    <span>New Video Chat</span>
+                </button>
+            </div>
+
+            <!-- Chat List -->
+            <div class="sidebar-section">
+                <div class="section-title-row">
+                    <span class="section-title">Your Chats</span>
+                    <span id="chat-count-badge" class="badge">0 chats</span>
+                </div>
+                <div id="chat-list" class="chat-list">
+                    <div class="loading-shimmer">Loading chats...</div>
+                </div>
+            </div>
+
+            <!-- User Profile & Logout Footer -->
+            <div class="sidebar-footer">
+                <div class="user-profile">
+                    <div class="user-avatar" id="user-avatar">👤</div>
+                    <div class="user-info">
+                        <span class="user-email" id="user-email-display">user@example.com</span>
+                        <span class="user-status-dot">● Online</span>
+                    </div>
+                </div>
+                <button id="logout-btn" class="icon-btn logout-btn" title="Log Out">⎋</button>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-main">
+            <!-- Active Chat Header -->
+            <header class="chat-header">
+                <div class="header-left">
+                    <button id="header-sidebar-toggle-btn" class="icon-btn header-toggle-btn" title="Toggle Sidebar (Expand/Collapse)">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>
+                        </svg>
+                    </button>
+                    <div class="header-title-group">
+                        <div class="header-title-row">
+                            <h1 class="header-title" id="active-chat-title">Select or Create a Chat</h1>
+                            <button id="rename-chat-btn" class="icon-btn edit-title-btn" title="Rename this conversation" style="display: none;">
+                                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                                    <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="header-videos" id="active-chat-videos">
+                            <!-- Video chips will be rendered here -->
+                        </div>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button id="open-add-video-btn" class="pill-btn add-video-btn" title="Add another video to this chat" style="display: none;">
+                        <span>+ Add Video</span>
+                    </button>
+                    <button id="delete-current-chat-btn" class="pill-btn delete-chat-btn" title="Delete this chat and its video knowledge" style="display: none;">
+                        <span>🗑 Delete Chat</span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Message Thread -->
+            <div class="chat-messages" id="chat-messages">
+                <!-- Welcome / Empty State Placeholder -->
+                <div class="welcome-card" id="welcome-card">
+                    <div class="welcome-icon">🎬</div>
+                    <h2>No Chat Selected</h2>
+                    <p>Select an existing video chat from the sidebar or click <strong>New Video Chat</strong> to ingest any YouTube video or playlist.</p>
+                    <button class="primary-btn center-btn" id="welcome-new-chat-btn">Create Your First Video Chat</button>
+                </div>
+            </div>
+
+            <!-- Chat Input Bar -->
+            <div class="chat-input-wrapper" id="chat-input-wrapper">
+                <form id="chat-form" class="chat-input-form">
+                    <textarea 
+                        id="user-query-input" 
+                        class="chat-textarea" 
+                        placeholder="Ask anything about this chat's videos... (Enter to send, Shift+Enter for newline)"
+                        rows="1"
+                        disabled
+                        required
+                    ></textarea>
+                    <button type="submit" id="send-btn" class="send-button" title="Send Question" disabled>
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                        </svg>
+                    </button>
+                </form>
+                <div class="input-hint">
+                    Grounded strictly in this chat's video transcripts &bull; 8-Message Buffer &bull; Recursive Long-term Memory &bull; Exact Second Deep-Links
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>

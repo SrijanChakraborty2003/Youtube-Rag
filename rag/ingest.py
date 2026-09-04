@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from rag.chunker import parse_srt_file, create_sliding_window_chunks
 from rag.vectorstore import VectorStoreManager
 
@@ -8,12 +8,14 @@ def ingest_video(
     video_folder: str,
     chunk_seconds: float = 60.0,
     overlap_seconds: float = 5.0,
-    auto_vectorize: bool = True
+    auto_vectorize: bool = True,
+    chat_id: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Reads audio.srt and metadata.json from video_folder, performs 60s/5s sliding
     window chunking, saves the chunks to chunks.json, embeds and indexes chunks into
-    ChromaDB, and returns the chunk list.
+    ChromaDB scoped by chat_id and user_id, and returns the chunk list.
     """
     if not os.path.exists(video_folder):
         raise FileNotFoundError(f"Video folder does not exist: {video_folder}")
@@ -49,6 +51,11 @@ def ingest_video(
         overlap_seconds=overlap_seconds
     )
 
+    # Attach chat_id and user_id to chunk objects
+    for c in chunks:
+        c["chat_id"] = str(chat_id or "")
+        c["user_id"] = str(user_id or "")
+
     # Save chunks to chunks.json in the video folder
     chunks_path = os.path.join(video_folder, "chunks.json")
     with open(chunks_path, "w", encoding="utf-8") as f:
@@ -58,13 +65,14 @@ def ingest_video(
 
     # Automatically vectorize and index into ChromaDB
     if auto_vectorize and chunks:
-        print(f"[INGEST] Automatically indexing {len(chunks)} chunks into ChromaDB Vector Store...")
+        print(f"[INGEST] Automatically indexing {len(chunks)} chunks into ChromaDB Vector Store (chat_id={chat_id})...")
         try:
             vstore = VectorStoreManager()
-            vstore.upsert_chunks(chunks)
+            vstore.upsert_chunks(chunks, chat_id=chat_id, user_id=user_id)
             print(f"[INGEST] Vector indexing complete!")
         except Exception as vec_err:
             print(f"[INGEST] Warning: Failed to vectorize chunks into ChromaDB: {vec_err}")
 
     return chunks
+
 

@@ -1,241 +1,253 @@
-# Technical Architecture & System Design Specification: Video Knowledge RAG
+# Video Knowledge RAG: Production Multi-User Architecture & System Specification
 
-This document provides a comprehensive, end-to-end technical deep dive into the **Video Knowledge RAG (Retrieval-Augmented Generation)** system. It covers the data ingestion pipeline, automatic speech recognition (ASR), sliding-window chunking algorithms, bi-encoder vector embeddings, persistent vector storage, hybrid search (BM25 + Dense Vectors), Reciprocal Rank Fusion (RRF), and FlashRank cross-encoder re-ranking. 
-
-This guide is designed both as system documentation and as complete **technical interview preparation** for this project.
+An end-to-end, enterprise-grade **Video Knowledge Retrieval-Augmented Generation (RAG)** platform featuring per-chat video isolation, multi-user privacy with email OTP authentication, real-time Server-Sent Events (SSE) token streaming, a 3-way adaptive intent router, anti-context poisoning guard, an 8-message conversational buffer with recursive rolling summarization, in-app background YouTube video/playlist ingestion, and second-accurate YouTube timestamp citations.
 
 ---
 
-## 1. High-Level System Architecture & Flowchart
-
-The system ingests YouTube videos, extracts high-fidelity audio, transcribes speech with word/cue timestamps, breaks down transcripts into time-aligned overlapping chunks, computes dense bi-encoder embeddings, indexes data in ChromaDB & BM25, and retrieves precise timestamp-linked context using cross-encoder re-ranking.
+## 1. High-Level System Architecture
 
 ```mermaid
 flowchart TD
-    subgraph DataIngestion["Phase 1: Audio Download & Sequential ASR Pipeline"]
-        A["YouTube Video / Playlist URL"] -->|yt-dlp + curl-cffi| B["Audio Downloader (audio_downloader.py)"]
-        B -->|Extract mono 16kHz WAV| C["Temporary WAV File"]
-        C -->|Nvidia NeMo Parakeet 0.6B CTC| D["Audio Transcriber (audio_transcriber.py)"]
-        D -->|Save Millisecond Cue Timestamps| E["Subtitles File (audio.srt)"]
-        D -->|Save Title & URL| F["Metadata File (metadata.json)"]
-        E & F -->|Immediate Cleanup| G["Delete Temporary WAV File (Free Disk Space)"]
+    subgraph AuthLayer["1. Authentication & Multi-User Isolation (rag/auth.py & rag/database.py)"]
+        A["User Visits Web App (Port 5000)"] --> B{"Session Token Active?"}
+        B -->|No| C["Input Email & Request 6-Digit OTP"]
+        C --> D["Dispatch OTP (SMTP Inbox / Terminal Console)"]
+        D --> E["Verify OTP & Issue 7-Day Session Token"]
+        B -->|Yes| F["Load User Isolated Private Chats"]
+        E --> F
     end
 
-    subgraph ChunkingPipeline["Phase 2: Sliding Window Chunking & Deep Link Generation"]
-        E & F --> H["SRT Cue Parser & Time Normalizer (rag/chunker.py)"]
-        H --> I["Sliding Window Chunker (60s Window, 5s Overlap)"]
-        I --> J["YouTube Deep Link Builder (&t=XXs)"]
-        J --> K["Structured JSON Chunks (chunks.json)"]
+    subgraph ChatIngest["2. In-App Video & Playlist Ingestion Worker (web/chat_app.py)"]
+        F --> G["Click '+ New Video Chat' or '+ Add Video'"]
+        G --> H["Input YouTube Video or Playlist URL"]
+        H --> I["Background Thread Worker: audio_downloader.py (yt-dlp + curl_cffi)"]
+        I --> J["NVIDIA NeMo GPU ASR (Parakeet CTC 0.6B FastConformer)"]
+        J --> K["Sliding Window Chunker (60s window, 5s overlap) with Subtitle Cues"]
+        K --> L["Embed Chunks (BAAI/bge-small-en-v1.5) & Upsert to ChromaDB"]
+        L --> M["Tag All Chunks with chat_id & user_id (Zero Cross-Chat Leakage)"]
+        I -.->|Progress Updates| N["Sidebar Mini Progress Bar (Polled every 2.5s)"]
+        I -.->|On Completion| O["Toast Notification: Ingestion Complete!"]
     end
 
-    subgraph VectorIndexing["Phase 3: Dense Embeddings & Vector Storage"]
-        K --> L["Bi-Encoder Model: BAAI/bge-small-en-v1.5 (rag/embeddings.py)"]
-        L -->|Generate 384-dim Dense Vectors| M["Embedding Vectors"]
-        K & M --> N["ChromaDB Vector Database (rag/vectorstore.py)"]
-        N -->|Persistent HNSW Index| O["./chroma_db/ Store"]
+    subgraph RouterAndMemory["3. Conversational Memory & 3-Way Intent Router (rag/agent.py)"]
+        P["User Sends Message in Chat Workspace"] --> Q["Fetch Conversation History from SQLite"]
+        Q --> R{"Message Count > 8?"}
+        R -->|Yes| S["Recursive Rolling Summary via gpt-oss:120b-cloud\n(Stored in SQLite chats.summary)"]
+        S --> T["Prompt Buffer = Rolling Summary + Last 8 Messages Verbatim"]
+        R -->|No| T
+        T --> ROUTE{"classify_intent(user_query)"}
     end
 
-    subgraph RetrievalEngine["Phase 4: Hybrid Search & Re-ranking Engine"]
-        P["User Query"] --> Q["Dense Vector Search (ChromaDB Cosine Similarity)"]
-        P --> R["Sparse Keyword Search (BM25Okapi over plain_text)"]
-        Q -->|Top-10 Dense Candidates| S["Reciprocal Rank Fusion (RRF)"]
-        R -->|Top-10 Sparse Candidates| S
-        S -->|Top Candidate Pool| T["FlashRank Cross-Encoder (ms-marco-MiniLM-L-12-v2)"]
-        T -->|Joint Query-Passage Attention Re-scoring| U["Top-N Precision Chunks with Deep Timestamp Links"]
+    subgraph ExecutionPaths["4. Multi-Path Execution Engine"]
+        ROUTE -->|Chat| PATH_A["Path A: DIRECT_CHAT\n(Zero RAG, pure conversational response)"]
+        ROUTE -->|Summary| PATH_B["Path B: VIDEO_SUMMARY\n(Structured Multi-Video Catalog + 35-Chunk Adaptive Sampling)"]
+        ROUTE -->|RAG| PATH_C["Path C: TARGETED RAG\n(Anti-Context Poisoning Guard + Hybrid Search + FlashRank)"]
+    end
+
+    subgraph RAGDetail["Path C Details: Scoped Hybrid Search & Re-ranking"]
+        PATH_C --> C1{"is_correlated_with_history()?"}
+        C1 -->|No| C2["chat_context = '' (Prevents cross-video keyword pollution)"]
+        C1 -->|Yes| C3["chat_context = Recent Buffer (Resolves pronouns)"]
+        C2 --> C4["5-Query Expansion via gpt-oss:120b-cloud"]
+        C3 --> C4
+        C4 --> C5["Parallel Scoped Retrieval: ChromaDB Dense + On-The-Fly BM25"]
+        C5 --> C6["Reciprocal Rank Fusion (RRF -> Top 10)"]
+        C6 --> C7["FlashRank Cross-Encoder (ms-marco-MiniLM-L-12-v2 -> Top 5)"]
+        C7 --> C8["CitationPromptEngine: Exact Cues with Timestamp Links"]
+    end
+
+    subgraph StreamOutput["5. Server-Sent Events (SSE) & UI Streaming (web/static/js/chat.js)"]
+        PATH_A --> SSE["Flask Generator: Response(stream_with_context(), mimetype='text/event-stream')"]
+        PATH_B --> SSE
+        C8 --> SSE
+        SSE --> CLIENT["Client ReadableStream Reader Loop"]
+        CLIENT --> AUTO_SCROLL{"User Scrolled Up to Read?"}
+        AUTO_SCROLL -->|No| SCROLL_DOWN["Smoothly snap to bottom with incoming tokens"]
+        AUTO_SCROLL -->|Yes| KEEP_POS["Pause auto-scroll to preserve reading position"]
+        CLIENT --> PILLS["Transform Citations into Interactive YouTube Timestamp Pills"]
     end
 ```
 
 ---
 
-## 2. Step-by-Step Module Technical Breakdown
+## 2. Core Capabilities & Architectural Innovations
 
-### Module 1: Sequential Audio Downloader & Disk Safety
-- **Files:** [`audio_downloader.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/audio_downloader.py), [`main.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/main.py)
-- **Role:** Handles resilient downloading of YouTube single videos or entire playlists without filling local storage.
-- **Key Technical Details:**
-  - **Tooling:** Uses `yt-dlp` combined with `curl-cffi` to bypass anti-bot and rate-limiting measures on YouTube.
-  - **Callback Execution Pattern (`process_track_synchronously`):** Standard downloads pull all WAV files at once, requiring tens of gigabytes of disk space. Here, `yt-dlp` delegates a completion callback per track:
-    1. Downloads single video audio as WAV (`16kHz`, mono).
-    2. Immediately triggers ASR transcription.
-    3. Deletes the multi-hundred-megabyte WAV file from disk **before** downloading the next track.
+### 1. Per-Chat Video Isolation & Scoping
+- Every chat is an independent workspace containing one or more YouTube videos or complete playlists.
+- Dense queries in ChromaDB execute with strict boolean filters:
+  ```python
+  where = {"$and": [{"chat_id": chat_id}, {"user_id": user_id}]}
+  ```
+- Sparse keyword search builds a dynamic, lightweight **BM25Okapi index on-the-fly** strictly using the active chat's chunks.
+- Chunks and queries never bleed across different chats or different users.
 
----
+### 2. Multi-User Privacy & Zero Data Leakage
+- Users authenticate with **Email & 6-digit OTP**.
+- User sessions, chats, message histories, and vector chunks are strictly partitioned by `user_id`.
+- User A can never view, search, or access videos, chunks, or conversations belonging to User B.
 
-### Module 2: Automatic Speech Recognition (ASR)
-- **File:** [`audio_transcriber.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/audio_transcriber.py)
-- **Role:** Converts raw audio signals into timestamped subtitle tracks (`audio.srt`).
-- **Key Technical Details:**
-  - **Model:** Nvidia NeMo Parakeet CTC 0.6B (`nvidia/parakeet-ctc-0.6b`), a 600M parameter FastConformer model optimized for fast, accurate English ASR.
-  - **Chunked Inference:** Large audio files are processed in 60-second audio segments with 1-second overlaps using `soundfile` and `torch`.
-  - **SRT Cue Formatting:** Converts raw model character/word output into standard SRT subtitle blocks:
-    ```srt
-    1
-    00:00:00,080 --> 00:00:10,720
-    Today we're going to take a look at Needle 2, a tiny agentic LLM with only 45 million parameters...
-    ```
+### 3. 3-Way Adaptive Intent Router & Workspace Awareness
+The system analyzes every incoming message to determine the optimal response strategy:
+1. **`DIRECT_CHAT`**: For greetings (*"hi"*, *"hello"*), thanks (*"thank you"*, *"got it"*), casual dialogue, and **workspace meta-questions** (*"how many videos are in this chat?"*, *"what videos do we have?"*, *"list the videos"*). Answered directly and accurately using the chat's registered video catalog without triggering RAG.
+2. **`VIDEO_SUMMARY`**: Triggered when the user asks for a comprehensive summary, timeline, chapters, or key takeaways of the video.
+3. **`RAG`**: For fact-seeking queries, technical questions, tool comparisons, or specific topics in the video.
 
----
+### 4. Smart Duplicate Video & Playlist Prevention
+When adding content via the **+ Add Video** modal:
+- The system parses YouTube URLs across all formats (standard watch, shortened `youtu.be`, embeds, shorts, playlists).
+- It validates whether the video or playlist is already indexed in the chat, was previously ingested as part of a playlist, or is currently processing.
+- Rejects duplicate additions with HTTP 400 and renders clear, friendly feedback in the modal banner and toast notifications.
 
-### Module 3: Sliding Window Chunking & Deep Link Generation
-- **Files:** [`rag/chunker.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/chunker.py), [`rag/ingest.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/ingest.py)
-- **Role:** Parses subtitle timestamps, creates semantically rich time-overlapping windows, and computes YouTube deep-link URLs.
-- **Key Technical Details:**
-  - **Timestamp Normalization:** Converts SRT string format `HH:MM:SS,mmm` into float seconds ($t_{sec} = 3600 \times H + 60 \times M + S + \frac{ms}{1000}$).
-  - **Sliding Time Window Algorithm:**
-    - Window Size ($W$): `60.0` seconds
-    - Overlap Size ($O$): `5.0` seconds
-    - Step Size ($S = W - O$): `55.0` seconds
-    - Aggregates all SRT subtitle cues whose time spans overlap with $[win\_start, win\_start + W]$.
-  - **Dual Text Representation:**
-    - `text`: Subtitle cues formatted with explicit inline timestamp brackets, e.g. `"[00:12:50] Set volume to 50."`
-    - `plain_text`: Clean concatenated transcript text without brackets for clean embedding and BM25 tokenization.
-  - **Deep-Link URL Calculation:**
-    - Extract 11-character YouTube video ID (e.g. `0hgzLDHplYk`).
-    - Generate millisecond/second start timestamp URL: `https://www.youtube.com/watch?v=0hgzLDHplYk&t=770s`
-  - **Chunk Output Data Schema:**
-    ```json
-    {
-      "chunk_id": "0hgzLDHplYk_14",
-      "video_title": "Needle 2: The 45M Parameter Model That Runs Everywhere",
-      "video_url": "https://www.youtube.com/watch?v=0hgzLDHplYk",
-      "start_seconds": 770.0,
-      "end_seconds": 831.0,
-      "start_timestamp": "00:12:50",
-      "end_timestamp": "00:13:51",
-      "timestamp_url": "https://www.youtube.com/watch?v=0hgzLDHplYk&t=770s",
-      "text": "[00:12:50] Set volume to 50. [00:12:55] Okay so it generated set volume volume 50...",
-      "plain_text": "Set volume to 50. Okay so it generated set volume volume 50...",
-      "cues": [...]
-    }
-    ```
+### 5. Ephemeral Structured Multi-Video Catalog & Adaptive Sampling
+When `VIDEO_SUMMARY` is invoked:
+- It compiles an in-memory structured catalog with video titles, YouTube URLs, and chronological segment transcripts.
+- **Recursive Playlist Walk**: Automatically discovers nested playlist video folders (`op/<chat>/<playlist>/<video>/chunks.json`) so multi-video playlists load seamlessly.
+- **Adaptive Downsampling**: If a video contains more than 35 chunks:
+  $$\text{sample\_step} = \max(1, \lfloor \text{len(chunks)} / 35 \rfloor)$$
+  It evenly samples checkpoint segments across the start-to-finish timeline. This guarantees that chats with multiple long videos (e.g. 10 videos, 500+ chunks) fit safely into the LLM context window without VRAM spikes or slowdowns.
+
+### 6. Anti-Context Poisoning Guard (`is_correlated_with_history`)
+- Before expanding queries for RAG, the system checks whether the user's new question is semantically related to the previous dialogue turns.
+- If the user changes topic or asks an independent question, `chat_context` is cleared (`""`), preventing keywords from previous videos from contaminating search results.
+
+### 7. Real-Time Token Streaming with Smart Auto-Scroll Guard
+- Responses are delivered token-by-token via **Server-Sent Events (SSE)**.
+- The frontend [`chat.js`](file:///c:/Users/CT_USER/Desktop/Rag/web/static/js/chat.js) uses a `ReadableStream` reader with a blinking terminal cursor.
+- **Auto-Scroll Guard**: If the user scrolls up to inspect previous answers, auto-scrolling automatically pauses so their view isn't yanked downward as new tokens arrive.
+
+### 8. Immediate 8-Message Buffer + Recursive Rolling Summarization
+- The **immediate last 8 messages** (4 conversational turns) are kept verbatim in the context prompt.
+- Older messages beyond 8 turns are condensed into a rolling summary using `gpt-oss:120b-cloud` and stored in SQLite (`chats.summary`).
+- Preserves deep historical context across 50+ conversational turns while keeping token usage bounded.
+
+### 9. Exact Second-Level Timestamp Deep Links
+- Subtitle cues preserve millisecond-accurate timestamps (`start_sec`, `end_sec`).
+- Citations link directly to the exact second on YouTube (`&t=XXs`), preventing chunk-boundary inaccuracies.
 
 ---
 
-### Module 4: Bi-Encoder Embeddings & Persistent Vector Database
-- **Files:** [`rag/config.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/config.py), [`rag/embeddings.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/embeddings.py), [`rag/vectorstore.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/vectorstore.py)
-- **Role:** Generates dense semantic vector representations and persists vectors & metadata locally.
-- **Key Technical Details:**
-  - **Embedding Model (`BAAI/bge-small-en-v1.5`):**
-    - Architecture: Bi-Encoder transformer (384 dimensions, ~133MB footprint).
-    - Top benchmark score on Massive Text Embedding Benchmark (MTEB) for compact models.
-    - Fast batch inference on both CPU and CUDA GPU.
-  - **Vector Database (ChromaDB):**
-    - Local persistent HNSW (Hierarchical Navigable Small World) index saved in `./chroma_db/`.
-    - Distance Metric: Cosine Distance ($D_{cosine} = 1 - \frac{u \cdot v}{\|u\| \|v\|}$).
-    - Rich Metadata Storage: Stores all video metadata, timestamps, deep links, and serialized cue JSON (`cues_json`) directly inside vector payload records.
+## 3. Technical Module Breakdown
+
+### 1. Persistence & SQLite Schema ([rag/database.py](file:///c:/Users/CT_USER/Desktop/Rag/rag/database.py))
+SQLite database (`rag_app.db`) operating in WAL mode:
+- `users`: `id`, `email`, `created_at`
+- `otp_codes`: `id`, `email`, `code`, `expires_at`, `verified`
+- `sessions`: `token`, `user_id`, `created_at`, `expires_at`
+- `chats`: `chat_id`, `user_id`, `title`, `summary`, `created_at`, `updated_at`
+- `chat_messages`: `id`, `chat_id`, `user_id`, `role`, `content`, `metadata_json`, `created_at`
+- `chat_videos`: `id`, `chat_id`, `user_id`, `video_title`, `video_url`, `folder_name`, `chunk_count`, `cues_count`, `status`, `created_at`
+- `ingest_jobs`: `job_id`, `chat_id`, `user_id`, `url`, `status`, `step`, `progress`, `logs_json`, `created_at`, `completed_at`
+
+### 2. Authentication & Email OTP ([rag/auth.py](file:///c:/Users/CT_USER/Desktop/Rag/rag/auth.py))
+- **OTP Generation**: Cryptographic 6-digit random code with 10-minute validity.
+- **SMTP Sending**: Supports standard SMTP with STARTTLS (Port 587) or SSL (Port 465) via `.env`.
+- **Console Fallback**: If SMTP is not configured, the verification code is printed securely to the backend server terminal console:
+  `[AUTH OTP] User Email: {email} | Generated OTP: >>> {code} <<<`
+- **Session Tokens**: 256-bit secure hex tokens stored in SQLite with 7-day validity and `rag_session` cookie support.
+
+### 3. Scoped Vector Store & Hybrid Retriever ([rag/vectorstore.py](file:///c:/Users/CT_USER/Desktop/Rag/rag/vectorstore.py), [rag/retriever.py](file:///c:/Users/CT_USER/Desktop/Rag/rag/retriever.py))
+- **Dense Vector Search**: ChromaDB HNSW cosine index (`BAAI/bge-small-en-v1.5`, 384 dimensions).
+- **Sparse Lexical Search**: On-the-fly `BM25Okapi` index over the active chat's scoped corpus.
+- **Reciprocal Rank Fusion (RRF)**: Merges dense and sparse ranks across 5 expanded queries into the Top 10 candidate chunks.
+- **FlashRank Cross-Encoder**: Joint query-document attention (`ms-marco-MiniLM-L-12-v2`) extracts the definitive Top 5 precision chunks.
+
+### 4. Conversational Agent & SSE Streaming ([rag/agent.py](file:///c:/Users/CT_USER/Desktop/Rag/rag/agent.py))
+- `chat_scoped_stream(user_query, chat_id, user_id)`:
+  - Fetches message history, buffers 8 messages, and maintains rolling summary.
+  - Classifies intent via `classify_intent()`.
+  - Dispatches to `DIRECT_CHAT`, `VIDEO_SUMMARY`, or `RAG`.
+  - Yields streaming SSE events (`status`, `intent`, `token`, `done`, `error`).
+  - Synthesizes grounded answers strictly using the chat's retrieved video cues and converts citations into clickable YouTube links.
 
 ---
 
-### Module 5: Hybrid Search (BM25 + Dense Vectors) & FlashRank Re-ranking Engine
-- **File:** [`rag/retriever.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/retriever.py)
-- **Role:** Delivers high precision retrieval by combining dense semantic search, sparse keyword search, rank fusion, and cross-encoder re-ranking.
-- **Key Technical Details:**
+## 4. Quick Start Guide
 
-#### 1. Dense Vector Search
-Retrieves candidates based on vector dot-product / cosine similarity over `bge-small-en-v1.5` embeddings. Catches semantic intent (e.g. `"adjust audio output"` matches `"set volume to 50"`).
+### 1. Prerequisites
+- Python 3.10+ (Tested in Conda environment `testing`)
+- Local Ollama running with `gpt-oss:120b-cloud` (`ollama run gpt-oss:120b-cloud`)
+- NVIDIA GPU with CUDA support (for NeMo Parakeet ASR transcription)
 
-#### 2. Sparse BM25 Keyword Search
-Uses `BM25Okapi` (`rank_bm25`) over tokenized `plain_text`. Catches exact model parameters, function names, commands, numbers, and flags (e.g. `"45M"`, `"Termux"`, `"volume 50"`).
+### 2. Configure Email OTP (Optional for Live Inboxes)
+To receive 6-digit login verification codes directly in your email inbox, configure your `.env` file in the project root:
 
-#### 3. Reciprocal Rank Fusion (RRF)
-Combines dense vector rank positions and sparse BM25 rank positions into a unified score for candidate selection:
-$$\text{RRF\_Score}(d) = \sum_{m \in \{\text{dense}, \text{sparse}\}} \frac{1}{k + r_m(d)}$$
-where $k = 60$ (smoothing constant) and $r_m(d)$ is the 1-based rank index of document $d$ in system $m$.
-
-#### 4. FlashRank Cross-Encoder Re-ranking
-- Model: `ms-marco-MiniLM-L-12-v2` via `flashrank`.
-- Unlike Bi-Encoders which compute query and document representations independently, a **Cross-Encoder** feeds the query and candidate passage simultaneously into self-attention layers:
-$$\text{Score} = \text{Transformer}(\text{Query} \oplus \text{Passage})$$
-- Evaluates fine-grained token-level cross-attention interactions, boosting top precision candidates to scores like **0.998+**.
-
----
-
-## 3. Step-by-Step End-to-End Data Pipeline Flow
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: INPUT                                                                    │
-│ User passes YouTube Video URL: "https://www.youtube.com/watch?v=0hgzLDHplYk"     │
-└─────────────────────────┬────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ STEP 2: DOWNLOAD & ASR                                                           │
-│ 1. audio_downloader.py extracts audio as 16kHz mono WAV                         │
-│ 2. audio_transcriber.py runs Nvidia NeMo Parakeet 0.6B CTC                       │
-│ 3. Generates op/<Title>/audio.srt & metadata.json                                │
-│ 4. Deletes temp WAV file to preserve C: drive space                              │
-└─────────────────────────┬────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ STEP 3: SLIDING WINDOW CHUNKING                                                  │
-│ 1. rag/chunker.py parses SRT time cues                                           │
-│ 2. Groups into 60s windows with 5s overlap                                       │
-│ 3. Generates timestamp URLs (e.g. &t=770s) & saves to op/<Title>/chunks.json     │
-└─────────────────────────┬────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ STEP 4: VECTOR & SPARSE INDEXING                                                 │
-│ 1. BAAI/bge-small-en-v1.5 generates 384-dim embeddings for plain_text            │
-│ 2. VectorStoreManager upserts vectors + rich metadata into local ./chroma_db/    │
-│ 3. HybridRetriever builds BM25 sparse index over plain_text tokens               │
-└─────────────────────────┬────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ STEP 5: HYBRID RETRIEVAL & FLASHRANK RERANKING                                   │
-│ User Query: "how to set the volume to 50 on Android"                             │
-│ 1. Dense Search -> Returns Top-10 vectors                                        │
-│ 2. BM25 Search  -> Returns Top-10 keyword matches                                │
-│ 3. RRF Fusion   -> Fuses rank positions with smoothing constant k=60             │
-│ 4. FlashRank    -> Passes top passages through ms-marco-MiniLM-L-12-v2           │
-│ Result          -> Match #1: 0hgzLDHplYk_14 (00:12:50 -> 00:13:51) [Score: 0.9984] │
-│                    Deep Link: https://www.youtube.com/watch?v=0hgzLDHplYk&t=770s │
-└──────────────────────────────────────────────────────────────────────────────────┘
+#### Gmail Setup (Recommended):
+1. Go to your [Google Account Security Settings](https://myaccount.google.com/security).
+2. Ensure **2-Step Verification** is turned **ON**.
+3. Create an **App Password** named `VideoRAG` (Google generates a 16-character code).
+4. Add the credentials to your `.env` file:
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_16_character_app_password
+SMTP_FROM=your_email@gmail.com
 ```
 
+> [!NOTE]
+> If SMTP is unconfigured, the 6-digit code is automatically printed to your terminal console (`[AUTH OTP] User Email: ... | Generated OTP: >>> 123456 <<<`). The code is never exposed on the frontend.
+
+### 3. Start the Application
+Run the single unified entrypoint:
+```powershell
+python main.py
+```
+
+Console Output:
+```
+============================================================================
+ 🎬 VIDEO KNOWLEDGE RAG SYSTEM (MULTI-USER ISOLATED CHATS)
+============================================================================
+ 💬 Web Application URL : http://localhost:5000
+============================================================================
+ Production Architecture:
+   • Multi-User Privacy  : Email & 6-Digit OTP Authentication (Zero Data Leakage)
+   • Video Isolation     : Each Chat is an Isolated Knowledge Base
+   • Real-Time Streaming : Server-Sent Events (SSE) with Smart Auto-Scroll
+   • Adaptive Routing    : Direct Chat | Whole-Video Summary | Precision RAG
+   • Long-Term Memory    : Immediate 8-Message Buffer + Recursive Rolling Summarization
+   • Ingestion Pipeline  : In-app background worker with real-time progress
+   • LLM Synthesis       : gpt-oss:120b-cloud (via Ollama)
+   • ASR Transcription   : NVIDIA NeMo Parakeet 0.6B CTC (Local GPU)
+   • Chunker             : 60s Sliding Window (5s overlap) with Subtitle Cues
+   • Dense Vector Store  : BAAI/bge-small-en-v1.5 + ChromaDB (Cosine)
+   • Sparse Search       : Scoped BM25Okapi Keyword Matching
+   • Query Expansion     : 5-Query Parallel Expansion via gpt-oss:120b-cloud
+   • Fusion & Re-ranker  : Reciprocal Rank Fusion (Top 10) + FlashRank (Top 5)
+   • Citations           : Exact Second Deep-Links [Video Title @ MM:SS](&t=XXs)
+============================================================================
+ Press Ctrl+C at any time to shut down the server.
+```
+
+### 4. Open in Browser
+1. Open [http://localhost:5000](http://localhost:5000).
+2. Enter your **Email** and click **Send Verification Code**.
+3. Enter the **6-Digit OTP** received in your email (or terminal console).
+4. Click **+ New Video Chat**, paste any YouTube video or playlist URL.
+5. Watch the background progress bar in the sidebar. Once complete (100%), ask any question, request a full video summary, or chat casually!
+
 ---
 
-## 4. Key Interview Questions & Technical Answers (FAQ)
-
-### Q1: Why did you choose a 60-second time sliding window with 5-second overlap instead of token/character chunking?
-**Answer:**
-Video transcripts differ fundamentally from text documents. Speech flows continuously over time, and ideas/explanations span across multiple sentences. Token or character splitting can chop a sentence mid-phrase or lose temporal alignment. A time-based 60-second window preserves natural speech context while keeping the exact timestamp interval manageable. The 5-second overlap ensures that sentences spanning across window boundaries are not lost or split across chunks.
-
-### Q2: Why use Hybrid Search (BM25 + Dense Vectors) instead of Vector Search alone?
-**Answer:**
-Dense semantic embeddings (like `bge-small-en-v1.5`) excel at understanding intent and paraphrased queries (e.g. matching `"adjust sound"` to `"set volume"`). However, dense vectors struggle with exact keyword matching, numbers, technical flags, model parameter sizes, or shell command names (e.g. `"45M"`, `"Termux"`, `"volume 50"`). BM25 sparse retrieval ensures exact keyword matches are never missed, while dense search ensures semantic meaning is captured. Combining both via Reciprocal Rank Fusion (RRF) gives the best of both worlds.
-
-### Q3: What is Reciprocal Rank Fusion (RRF) and why is it preferred over raw score addition?
-**Answer:**
-Vector search returns cosine distances (between 0.0 and 1.0), while BM25 returns un-bounded score totals based on term frequency and inverse document frequency. Adding or weighting these raw scores directly requires fragile normalization. RRF works strictly on **rank positions**:
-$$RRF\_Score(d) = \frac{1}{60 + r_{dense}} + \frac{1}{60 + r_{sparse}}$$
-Because it relies on rank order rather than raw scores, it cleanly merges scores from completely different retrieval paradigms.
-
-### Q4: What is the difference between a Bi-Encoder and a Cross-Encoder, and why use both?
-**Answer:**
-- **Bi-Encoder (`bge-small-en-v1.5`):** Encodes the Query and the Document independently into vector space. Vectors can be pre-computed and stored in a vector DB for fast similarity search across millions of documents in milliseconds.
-- **Cross-Encoder (`ms-marco-MiniLM-L-12-v2` / FlashRank):** Takes the Query and Document *together* as a single input pair into transformer self-attention layers, allowing full cross-attention between query words and document words. Cross-encoders are much more accurate but too slow to run across an entire database.
-- **Two-Stage Architecture:** We use the Bi-Encoder + BM25 to rapidly narrow down millions/thousands of chunks to 10 candidates, and then use the Cross-Encoder (FlashRank) to re-rank those 10 candidates for top precision.
-
-### Q5: How does the system prevent running out of disk space during large playlist ingestion?
-**Answer:**
-Raw uncompressed 16kHz WAV audio files consume ~2MB per minute. Ingesting dozens of long videos could easily fill tens of gigabytes of disk space. In `main.py`, we implement a synchronous callback pattern (`process_track_synchronously`). As soon as `yt-dlp` finishes downloading one audio track, the callback immediately runs ASR transcription, generates `audio.srt`, and **deletes the WAV file from disk** before `yt-dlp` starts downloading the next track.
+## 5. Exhaustive Technical Documentation
+For complete function signatures, mathematical formulas, and algorithm implementations, see:  
+👉 **[technical_details.md](file:///c:/Users/CT_USER/Desktop/Rag/technical_details.md)**
 
 ---
 
-## 5. System File Reference Map
+## 6. REST API & SSE Streaming Reference
 
-| Module / File | Description |
-| :--- | :--- |
-| [`main.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/main.py) | Entry point executing sequential download, transcription, and cleanup pipeline |
-| [`audio_downloader.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/audio_downloader.py) | `yt-dlp` audio extractor with browser cookies & callback support |
-| [`audio_transcriber.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/audio_transcriber.py) | Local ASR transcriber using Nvidia NeMo Parakeet CTC 0.6B |
-| [`rag/chunker.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/chunker.py) | SRT timestamp parser, 60s/5s sliding window chunker, deep link generator |
-| [`rag/config.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/config.py) | Model names (`bge-small-en-v1.5`, `ms-marco-MiniLM-L-12-v2`) & ChromaDB paths |
-| [`rag/embeddings.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/embeddings.py) | Bi-Encoder embedding wrapper for dense vector generation |
-| [`rag/vectorstore.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/vectorstore.py) | Persistent ChromaDB manager with vector upsert & similarity querying |
-| [`rag/retriever.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/retriever.py) | Hybrid Search engine (ChromaDB + BM25 + RRF + FlashRank re-ranking) |
-| [`rag/ingest.py`](file:///c:/Users/User/OneDrive/Documents/GitHub/Youtube-Rag/rag/ingest.py) | Automated video ingestion hook connecting SRT chunking to ChromaDB |
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/auth/request-otp` | Sends a 6-digit OTP to the requested email address (or logs to console) |
+| `POST` | `/api/auth/verify-otp` | Validates OTP and returns a 7-day session token |
+| `GET` | `/api/auth/me` | Validates current session token and returns user profile |
+| `POST` | `/api/auth/logout` | Invalidates session token and clears cookie |
+| `GET` | `/api/chats` | Lists all private chats belonging to the authenticated user |
+| `POST` | `/api/chats` | Creates a new chat (with optional initial video/playlist URL) |
+| `GET` | `/api/chats/<id>` | Returns chat details, messages, and indexed videos |
+| `DELETE` | `/api/chats/<id>` | Deletes chat, messages, local audio files, and ChromaDB vector chunks |
+| `GET` | `/api/chats/<id>/messages` | Returns full message history for a specific chat |
+| `POST` | `/api/chats/<id>/messages` | **SSE Streaming Endpoint**: Streams answer token-by-token with intent routing and citations |
+| `POST` | `/api/chats/<id>/videos` | Appends a video or playlist to an existing chat (blocks duplicates with HTTP 400) |
+| `GET` | `/api/jobs/active` | Polls real-time progress for all background ingestion jobs |
+| `GET` | `/api/jobs/completed` | Polls recently completed ingestion events to trigger toast popups |

@@ -1,9 +1,16 @@
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor
 from rank_bm25 import BM25Okapi
 from flashrank import Ranker, RerankRequest
 
-from rag.config import FLASHRANK_MODEL_NAME
+from rag.config import (
+    FLASHRANK_MODEL_NAME,
+    TOP_DENSE_PER_QUERY,
+    TOP_BM25_PER_QUERY,
+    RRF_TOP_CANDIDATES,
+    FINAL_TOP_K,
+)
 from rag.vectorstore import VectorStoreManager
 
 def SimpleTokenizer(text: str) -> List[str]:
@@ -42,21 +49,57 @@ class HybridRetriever:
             self.bm25 = None
             print("[RETRIEVER] Warning: BM25 corpus is empty.")
 
-    def dense_search(self, query_text: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    def dense_search(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        chat_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Performs dense vector retrieval via ChromaDB.
+        Performs dense vector retrieval via ChromaDB, optionally scoped to chat_id and user_id.
         """
-        return self.vectorstore.query_similar(query_text, top_k=top_k)
+        return self.vectorstore.query_similar(query_text, top_k=top_k, chat_id=chat_id, user_id=user_id)
 
-    def sparse_search(self, query_text: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    def sparse_search(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        chat_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Performs sparse keyword retrieval via BM25.
+        Performs sparse keyword retrieval via BM25, optionally scoped to chat_id and user_id.
         """
-        if not self.bm25 or not self.all_chunks:
-            return []
-
         query_tokens = SimpleTokenizer(query_text)
         if not query_tokens:
+            return []
+
+        # If scoped to a specific chat, build a scoped BM25 index on the fly
+        if chat_id:
+            chat_chunks = self.vectorstore.get_all_chunks(chat_id=chat_id, user_id=user_id)
+            if not chat_chunks:
+                return []
+            corpus = [SimpleTokenizer(c["plain_text"]) for c in chat_chunks]
+            bm25 = BM25Okapi(corpus)
+            scores = bm25.get_scores(query_tokens)
+            scored_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+            top_indices = scored_indices[:min(top_k, len(scored_indices))]
+            results = []
+            for rank, idx in enumerate(top_indices, 1):
+                if scores[idx] <= 0:
+                    continue
+                chunk = chat_chunks[idx]
+                results.append({
+                    "chunk_id": chunk["chunk_id"],
+                    "document": chunk["text"],
+                    "metadata": chunk,
+                    "score": float(scores[idx]),
+                    "rank": rank
+                })
+            return results
+
+        if not self.bm25 or not self.all_chunks:
             return []
 
         scores = self.bm25.get_scores(query_tokens)
@@ -80,88 +123,120 @@ class HybridRetriever:
     def hybrid_search(
         self,
         query_text: str,
-        top_dense: int = 10,
-        top_bm25: int = 10,
+        top_dense: int = TOP_DENSE_PER_QUERY,
+        top_bm25: int = TOP_BM25_PER_QUERY,
         rrf_k: float = 60.0,
-        top_candidates_count: int = 10,
-        final_top_k: int = 5
+        top_candidates_count: int = RRF_TOP_CANDIDATES,
+        final_top_k: int = FINAL_TOP_K,
+        chat_id: Optional[str] = None,
+        user_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Performs Hybrid Search using Reciprocal Rank Fusion (RRF) and FlashRank Re-ranking.
-        Steps:
-        1. Query ChromaDB for top_dense vectors.
-        2. Query BM25 for top_bm25 keyword matches.
-        3. Combine using RRF score: 1/(k + rank_dense) + 1/(k + rank_bm25).
-        4. Pass candidate chunks to FlashRank Cross-Encoder for precision re-scoring.
-        5. Return top final_top_k results.
+        Performs Single-Query Hybrid Search using Reciprocal Rank Fusion (RRF) and FlashRank Re-ranking.
         """
-        # Always refresh map/index if new items were added
-        if self.vectorstore.collection.count() != len(self.all_chunks):
-            self.refresh_index()
+        return self.multi_query_hybrid_search(
+            original_query=query_text,
+            queries=[query_text],
+            top_dense=top_dense,
+            top_bm25=top_bm25,
+            rrf_k=rrf_k,
+            rrf_top_candidates=top_candidates_count,
+            final_top_k=final_top_k,
+            chat_id=chat_id,
+            user_id=user_id
+        )
 
-        if not self.all_chunks:
-            print("[RETRIEVER] Knowledge base is empty.")
-            return []
+    def multi_query_hybrid_search(
+        self,
+        original_query: str,
+        queries: List[str],
+        top_dense: int = TOP_DENSE_PER_QUERY,
+        top_bm25: int = TOP_BM25_PER_QUERY,
+        rrf_k: float = 60.0,
+        rrf_top_candidates: int = RRF_TOP_CANDIDATES,
+        final_top_k: int = FINAL_TOP_K,
+        chat_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes multiple generated queries in parallel, scoped to a specific chat_id/user_id.
+        """
+        # Map of chunks for lookup
+        if chat_id:
+            chat_chunks = self.vectorstore.get_all_chunks(chat_id=chat_id, user_id=user_id)
+            if not chat_chunks:
+                print(f"[RETRIEVER] No chunks indexed for chat_id={chat_id}.")
+                return []
+            chunk_lookup = {c["chunk_id"]: c for c in chat_chunks}
+        else:
+            if self.vectorstore.collection.count() != len(self.all_chunks):
+                self.refresh_index()
+            if not self.all_chunks:
+                return []
+            chunk_lookup = self.chunk_id_map
 
-        # 1. Dense Search
-        dense_results = self.dense_search(query_text, top_k=top_dense)
-        
-        # 2. Sparse BM25 Search
-        sparse_results = self.sparse_search(query_text, top_k=top_bm25)
+        clean_queries = [q.strip() for q in queries if q and q.strip()]
+        if not clean_queries:
+            clean_queries = [original_query]
 
-        # 3. Reciprocal Rank Fusion (RRF)
+        # 1. Parallel execution of dense and sparse search for each query
+        def _search_query(q: str) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+            d_res = self.dense_search(q, top_k=top_dense, chat_id=chat_id, user_id=user_id)
+            s_res = self.sparse_search(q, top_k=top_bm25, chat_id=chat_id, user_id=user_id)
+            return q, d_res, s_res
+
+        max_workers = min(len(clean_queries), 5)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            search_outputs = list(executor.map(_search_query, clean_queries))
+
+        # 2. Reciprocal Rank Fusion across all query executions
         rrf_scores: Dict[str, float] = {}
 
-        # Dense ranks
-        for rank, item in enumerate(dense_results, 1):
-            cid = item["chunk_id"]
-            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
+        for q_text, dense_results, sparse_results in search_outputs:
+            for rank, item in enumerate(dense_results, 1):
+                cid = item["chunk_id"]
+                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
 
-        # Sparse ranks
-        for item in sparse_results:
-            cid = item["chunk_id"]
-            rank = item["rank"]
-            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
+            for item in sparse_results:
+                cid = item["chunk_id"]
+                rank = item["rank"]
+                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
 
         if not rrf_scores:
             return []
 
-        # Sort by RRF score descending
+        # Sort candidate chunks by RRF score descending -> Select Top candidates
         sorted_candidates = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        top_candidates = sorted_candidates[:min(top_candidates_count, len(sorted_candidates))]
+        top_candidates = sorted_candidates[:min(rrf_top_candidates, len(sorted_candidates))]
 
-        # 4. Prepare for FlashRank Re-ranking
+        # 3. FlashRank Cross-Encoder Re-ranking on the top candidates
         passages = []
-        candidate_chunk_objs = []
-
         for cid, rrf_score in top_candidates:
-            chunk = self.chunk_id_map.get(cid)
+            chunk = chunk_lookup.get(cid)
             if not chunk:
                 continue
-            
-            # Plain text context for cross-encoder reranking
+
             text_content = chunk.get("plain_text", chunk.get("text", ""))
             passages.append({
                 "id": cid,
                 "text": text_content,
                 "meta": chunk
             })
-            candidate_chunk_objs.append(chunk)
 
         if not passages:
             return []
 
-        # Rerank with FlashRank
-        rerank_req = RerankRequest(query=query_text, passages=passages)
+        # Re-rank candidate passages against the original user query
+        rerank_req = RerankRequest(query=original_query, passages=passages)
         reranked_results = self.ranker.rerank(rerank_req)
 
-        # 5. Format Top Results
+        # 4. Extract and Format Top N chunks
         final_results = []
         for item in reranked_results[:final_top_k]:
             cid = item["id"]
-            chunk = self.chunk_id_map.get(cid, {})
+            chunk = chunk_lookup.get(cid, {})
             score = float(item["score"])
-            
+
             final_results.append({
                 "chunk_id": cid,
                 "rerank_score": round(score, 4),
@@ -178,3 +253,4 @@ class HybridRetriever:
             })
 
         return final_results
+
