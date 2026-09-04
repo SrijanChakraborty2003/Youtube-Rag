@@ -103,7 +103,7 @@ When `VIDEO_SUMMARY` is invoked:
 - It compiles an in-memory structured catalog with video titles, YouTube URLs, and chronological segment transcripts.
 - **Recursive Playlist Walk**: Automatically discovers nested playlist video folders (`op/<chat>/<playlist>/<video>/chunks.json`) so multi-video playlists load seamlessly.
 - **Adaptive Downsampling**: If a video contains more than 35 chunks:
-  $$\text{sample\_step} = \max(1, \lfloor \text{len(chunks)} / 35 \rfloor)$$
+  $$\text{sample\\_step} = \max(1, \lfloor \text{len(chunks)} / 35 \rfloor)$$
   It evenly samples checkpoint segments across the start-to-finish timeline. This guarantees that chats with multiple long videos (e.g. 10 videos, 500+ chunks) fit safely into the LLM context window without VRAM spikes or slowdowns.
 
 ### 6. Anti-Context Poisoning Guard (`is_correlated_with_history`)
