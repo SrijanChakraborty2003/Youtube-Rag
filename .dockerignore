@@ -1,0 +1,39 @@
+# Version control & IDE config
+.git
+.gitignore
+.vscode
+.idea
+*.swp
+
+# Python cache & build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Notebooks, scratch code, test scripts & doc files
+learning.ipynb
+test_rag.py
+plan.md
+technical_details.md
+README.md
+
+# Runtime generated data, chunks & database files
+#chroma_db/
+#op/
+#rag_app.db
+#*.db
+#*.db-shm
+#*.db-wal
+
+# Environment variables & local logs
+
+*.log
+
+# Docker metadata
+Dockerfile
+.dockerignore
