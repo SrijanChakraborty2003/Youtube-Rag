@@ -25,7 +25,7 @@ from web.chat_app import app as chat_app
 
 def print_welcome_banner():
     print("\n" + "=" * 76)
-    print(" 🎬 VIDEO KNOWLEDGE RAG SYSTEM (MULTI-USER ISOLATED CHATS)")
+    print(" 🎬 VIDEO KNOWLEDGE RAG SYSTEM")
     print("=" * 76)
     print(" 💬 Web Application URL : http://localhost:5000")
     print("=" * 76)
